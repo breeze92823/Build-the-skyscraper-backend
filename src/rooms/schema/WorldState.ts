@@ -33,6 +33,8 @@ export const TowerState = schema(
     n: t.uint32().default(0), // building index (the look is the client's pickBuilding(n))
     floors: t.uint16().default(0), // finished floors of this building
     blocks: t.float64().default(0), // blocks in the floor being built
+    need: t.float64().default(0), // blocks the floor being built needs (sized to the room's bags when it started)
+    placed: t.float64().default(0), // blocks placed on this building so far (all floors)
     phase: t.string().default("building"), // "building" | "celebrate" | "sinking"
     phaseAt: t.float64().default(0), // server clock (ms) the phase began
     seeded: t.boolean().default(false), // the room's tower has its starting state (clients wait for it)

@@ -46,6 +46,7 @@ export const RECONNECT_SECONDS = 20;
 // ceilings, not game rules.
 export const CURRENCY_MAX = 1e33; // cash
 export const STAT_MAX = 1e15; // strength, speed, total blocks
+export const GOALS_DONE_MAX = 1e7; // Goals finished (ever / today)
 export const BUILDINGS_MAX = 1e6;
 export const BAG_MAX = 1e9;
 export const PLAY_SECONDS_MAX = 31_536_000; // ~1 year
@@ -54,7 +55,7 @@ export const UPGRADE_LEVEL_MAX = 1000;
 export const UPGRADE_KINDS_MAX = 32;
 export const FLAGS_MAX = 128; // passes, gym tiers, gear, pets seen: id -> true
 export const DAILY_STREAK_MAX = 1e6;
-export const TOWER_MAX = { n: 1e6, floors: 1000, blocks: 1e9 };
+export const TOWER_MAX = { n: 1e6, floors: 1000, blocks: 1e13 };
 // Pets (client PETS / PET): at most PETS_MAX owned, PET_TIERS_MAX craft tiers, EQUIPPED_MAX out at once.
 export const PETS_MAX = 500;
 export const PET_TIERS_MAX = 8;
@@ -82,13 +83,18 @@ export const REWARD_STREAK_MAX = 1e6;
 export const OFFLINE_MIN_S = 300;
 export const OFFLINE_MAX_S = 86_400;
 
-// The shared tower (tower.ts): ONE authoritative tower per room that every client displays. Building n's
-// size is deterministic from n (client config.js BUILDING_SCALE / INSIDE.time / NEXT_BUILDING / TOWER.sinkTime:
-// keep in step by hand). Timeline: building -> celebrate (INSIDE_SECONDS open lobby) -> sinking -> building n+1
+// The shared tower (tower.ts): ONE authoritative tower per room that every client displays. Building n has
+// floorsBase + n * floorsPer floors (max floorsMax). A floor's size is set when it starts, from the bags of the
+// room's ACTIVE builders (each `build` message carries the sender's `trip`: blocks one full bag places; a
+// builder is active for `active` s after their last build): trips(n) = tripsBase + n * tripsPer (max tripsMax)
+// x the sum of those bags x (1 + floor * floorGrowth), never less than minBase * minGrowth^n. So a floor takes a
+// minute or two whoever is in the room, and a new player's bag is a visible chunk of it. Keep in step with the
+// client config.js BUILDING_SCALE / INSIDE.time / NEXT_BUILDING / TOWER.sinkTime by hand. Timeline: building -> celebrate (INSIDE_SECONDS open lobby) -> sinking -> building n+1
 // NEXT_BUILDING_DELAY_S after the sinking started (sinkTime 3.2 + the Next Building reel's hold:
 // fadeIn .45 + spin 4.8 + settle .35 + hold 2.9 + fadeOut .45 - fadeOut / 2).
-export const BUILDING_SCALE = { floorsBase: 18, floorsPer: 6, floorsMax: 70, blocksBase: 220, blockGrowth: 2.15, floorGrowth: 0.05 };
-export const TOWER_N_MAX = 200; // blocksBase * blockGrowth^n stays finite
+export const BUILDING_SCALE = { floorsBase: 8, floorsPer: 2, floorsMax: 40, tripsBase: 1.2, tripsPer: 0.12, tripsMax: 3, minBase: 30, minGrowth: 1.08, floorGrowth: 0.03, active: 90 };
+export const TOWER_N_MAX = 5000; // minBase * minGrowth^n stays finite
+export const TRIP_MAX = 1e12; // the largest `trip` (blocks per full bag) a client may report
 export const INSIDE_SECONDS = 180;
 export const NEXT_BUILDING_DELAY_S = 8.725;
 export const TOWER_TICK_MS = 200; // how often the room advances the timeline

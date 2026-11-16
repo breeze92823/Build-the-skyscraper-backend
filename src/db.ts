@@ -21,6 +21,20 @@ export interface TimedBoost {
   left: number;
 }
 
+// The Goals tracker (client goals.js): the goal in progress (`kind` id, `need`, `have`, `reward` cash it was
+// promised when set), goals finished ever (`done`), the UTC day number and goals finished on it (`day` /
+// `today`, the daily full-reward set) and when it was last played (`seen`, epoch ms: the welcome-back bonus).
+export interface GoalsDoc {
+  kind: string;
+  need: number;
+  have: number;
+  reward: number;
+  done: number;
+  day: number;
+  today: number;
+  seen: number;
+}
+
 // The persisted client state: what `saveProgress` carries (see sanitize.ts), field for field the
 // client's `SAVED` list in stats.js. Signed-in players' progress lives here; guests keep theirs
 // in their browser.
@@ -49,6 +63,7 @@ export interface PlayerDoc {
   spins?: { normal: number; golden: number; pity: number };
   petSlots?: number; // extra pet slots bought with cash
   timed?: TimedBoost[]; // running timed boosts (reward prizes)
+  goals?: GoalsDoc; // the Goals tracker (client goals.js): client-authoritative like the rest, bounded by sanitize.ts
   rewards?: RewardsDoc; // Daily / Playtime / Free rewards: written ONLY by the server (rewards.ts)
   lastSeen?: number; // epoch ms of the last activity: written ONLY by the server (every save, leave and load)
   offlineSecs?: number; // seconds away not yet claimed as an offline reward: written ONLY by the server (offline.ts)
