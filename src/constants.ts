@@ -84,15 +84,34 @@ export const OFFLINE_MIN_S = 300;
 export const OFFLINE_MAX_S = 86_400;
 
 // The shared tower (tower.ts): ONE authoritative tower per room that every client displays. Building n has
-// floorsBase + n * floorsPer floors (max floorsMax). A floor's size is set when it starts, from the bags of the
-// room's ACTIVE builders (each `build` message carries the sender's `trip`: blocks one full bag places; a
-// builder is active for `active` s after their last build): trips(n) = tripsBase + n * tripsPer (max tripsMax)
-// x the sum of those bags x (1 + floor * floorGrowth), never less than minBase * minGrowth^n. So a floor takes a
-// minute or two whoever is in the room, and a new player's bag is a visible chunk of it. Keep in step with the
-// client config.js BUILDING_SCALE / INSIDE.time / NEXT_BUILDING / TOWER.sinkTime by hand. Timeline: building -> celebrate (INSIDE_SECONDS open lobby) -> sinking -> building n+1
+// floorsBase + n * floorsPer floors (max floorsMax). A floor's size is set ONCE, when it starts, so it takes
+// about `floorMinutes(builders)` of the room's real building: soloMins (2.5) for one builder, rising to
+// soloMins + crowdMins * (1 - 1/N) (4 for two, ~5 for five, 5.5 for a crowd), never over maxMins. A builder
+// counts for `active` s after their last `build`; their pace is the blocks they reported over the last
+// `window` s (BuildRate), blended in their first `window` s with one full bag (`trip`) every `tripSecs` s.
+// floor = the active builders' summed blocks/min x the floor's minutes (never under minBase * minGrowth^n).
+// The minutes ease toward the new crowd size floor by floor (`rampUp` / `rampDown` of the way), so the work
+// creeps up instead of jumping. A started floor never grows; if the room's pace drops under `shrinkAt` of the
+// pace it was sized for, only its REMAINING part shrinks (its progress never goes back).
+// Keep in step with the client config.js BUILDING_SCALE / INSIDE.time / NEXT_BUILDING / TOWER.sinkTime by hand. Timeline: building -> celebrate (INSIDE_SECONDS open lobby) -> sinking -> building n+1
 // NEXT_BUILDING_DELAY_S after the sinking started (sinkTime 3.2 + the Next Building reel's hold:
 // fadeIn .45 + spin 4.8 + settle .35 + hold 2.9 + fadeOut .45 - fadeOut / 2).
-export const BUILDING_SCALE = { floorsBase: 8, floorsPer: 2, floorsMax: 40, tripsBase: 1.2, tripsPer: 0.12, tripsMax: 3, minBase: 30, minGrowth: 1.08, floorGrowth: 0.03, active: 90 };
+export const BUILDING_SCALE = {
+  floorsBase: 8,
+  floorsPer: 2,
+  floorsMax: 40,
+  soloMins: 2.5,
+  crowdMins: 3,
+  maxMins: 6,
+  rampUp: 0.5,
+  rampDown: 0.75,
+  window: 180,
+  tripSecs: 50,
+  shrinkAt: 0.7,
+  minBase: 30,
+  minGrowth: 1.08,
+  active: 90,
+};
 export const TOWER_N_MAX = 5000; // minBase * minGrowth^n stays finite
 export const TRIP_MAX = 1e12; // the largest `trip` (blocks per full bag) a client may report
 export const INSIDE_SECONDS = 180;

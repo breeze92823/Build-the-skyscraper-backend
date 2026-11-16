@@ -1,6 +1,6 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState, TowerState } from "./schema/WorldState.js";
-import { BUILD_BUCKET, BUILD_MSG_MAX, BUILDING_SCALE, TRIP_MAX, INVITES_MAX, INVITE_NEW_PLAYTIME_MAX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS, TOWER_TICK_MS } from "../constants.js";
+import { BUILD_BUCKET, BUILD_MSG_MAX, TRIP_MAX, INVITES_MAX, INVITE_NEW_PLAYTIME_MAX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS, TOWER_TICK_MS } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
 import { devIdentity, verifyToken, type Identity } from "../auth.js";
@@ -9,7 +9,7 @@ import { ranksOf, topBoards } from "../leaderboard.js";
 import { flushBoxity, reportPlayer } from "../boxity.js";
 import { RewardsState, freshRewards, sanitizeRewards } from "../rewards.js";
 import { accrueOffline, offlineView, sanitizeOfflineSecs } from "../offline.js";
-import { TowerRules, sanitizeTowerSeed } from "../tower.js";
+import { BuildRate, TowerRules, crewOf, sanitizeTowerSeed } from "../tower.js";
 import { claimInvite, inviteFields, inviteView, isActive, isNewPlayer, isUserId, readInvite, rememberSent, unclaimInvite, type InviteState } from "../invite.js";
 
 function sanitizeName(raw: unknown): string {
@@ -40,18 +40,11 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   })();
   maxClients = ROOM_MAX_CLIENTS;
 
-  // sessionId -> the player's bag (blocks one full bag places, `build.trip`) and when they last built:
-  // the floors are sized to the bags of the room's active builders (tower.ts floorNeed).
-  private trips = new Map<string, { trip: number; at: number }>();
-  // The summed bags of the builders who placed blocks in the last BUILDING_SCALE.active s.
-  private roomTrip(): number {
-    const since = Date.now() - BUILDING_SCALE.active * 1000;
-    let sum = 0;
-    for (const t of this.trips.values()) if (t.at >= since) sum += t.trip;
-    return sum;
-  }
+  // sessionId -> the player's building pace (blocks they reported, and their bag `build.trip` as the first
+  // guess): the floors are sized to the pace of the room's active builders (tower.ts BuildRate / floorNeed).
+  private rates = new Map<string, BuildRate>();
   // The shared tower's rules over state.tower (tower.ts).
-  private tower = new TowerRules(this.state.tower, () => this.roomTrip());
+  private tower = new TowerRules(this.state.tower, () => crewOf(this.rates.values(), Date.now()));
   // sessionId -> the tower the player's browser holds (join option `tower`): seeds a fresh room when the
   // first player to load has no stored one (a guest, or no database).
   private towerOffers = new Map<string, ReturnType<typeof sanitizeTowerSeed>>();
@@ -113,7 +106,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       if (p) applyEmote(p, msg);
     },
     // The blocks this player just placed on the shared tower: { blocks, trip } (the client batches ~4/s;
-    // `trip` = blocks one full bag of theirs places, which sizes the next floors). The server clamps to what
+    // `trip` = blocks one full bag of theirs places, the first guess at their pace, which sizes the next floors). The server clamps to what
     // the floor needs, rolls floors over, may finish the building (-> `built` to everyone) and the new
     // state reaches every client through WorldState.tower.
     build: (client: Client, msg: unknown) => {
@@ -122,9 +115,15 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       const m = msg as { blocks?: unknown; trip?: unknown } | null;
       const blocks = m?.blocks;
       if (typeof blocks !== "number" || !Number.isFinite(blocks)) return;
-      const trip = typeof m?.trip === "number" && Number.isFinite(m.trip) ? Math.min(TRIP_MAX, Math.max(1, m.trip)) : this.trips.get(client.sessionId)?.trip ?? 1;
-      this.trips.set(client.sessionId, { trip, at: Date.now() });
-      const res = this.tower.addBlocks(Math.min(BUILD_MSG_MAX, blocks), { id: p.uid || client.sessionId, name: p.username || "Player" }, Date.now());
+      const trip = typeof m?.trip === "number" && Number.isFinite(m.trip) ? Math.min(TRIP_MAX, Math.max(1, m.trip)) : 0;
+      const now = Date.now();
+      let rate = this.rates.get(client.sessionId);
+      if (!rate) this.rates.set(client.sessionId, (rate = new BuildRate()));
+      // Counted as active (and with their bag known) BEFORE the blocks go in, so a floor that starts with
+      // them sees them; their pace counts the blocks the tower actually took.
+      rate.add(0, trip, now);
+      const res = this.tower.addBlocks(Math.min(BUILD_MSG_MAX, blocks), { id: p.uid || client.sessionId, name: p.username || "Player" }, now);
+      rate.add(res.taken, trip, now);
       // `built` { n, builders: [{ id, name, blocks }] }: the Top Builders of the building that just finished.
       if (res.built) this.broadcast("built", res.built);
     },
@@ -376,7 +375,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.refs.delete(sessionId);
     this.activating.delete(sessionId);
     this.buildBuckets.delete(sessionId);
-    this.trips.delete(sessionId);
+    this.rates.delete(sessionId);
     this.rewards.delete(sessionId);
     this.claiming.delete(sessionId);
     this.offline.delete(sessionId);

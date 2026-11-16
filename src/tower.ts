@@ -17,7 +17,7 @@ export interface TowerData {
   n: number; // building index
   floors: number; // finished floors
   blocks: number; // blocks in the floor being built
-  need: number; // blocks the floor being built needs (set when it starts: the room's bags, see floorNeed)
+  need: number; // blocks the floor being built needs (set when it starts: the room's pace x its minutes, see floorNeed)
   placed: number; // blocks placed on this building so far (all floors)
   phase: string;
   phaseAt: number; // server ms the phase began
@@ -35,22 +35,83 @@ export function buildingFloors(n: number): number {
   const S = BUILDING_SCALE;
   return Math.min(S.floorsMax, S.floorsBase + n * S.floorsPer);
 }
-// Full bags of the room a floor of building n takes.
-export function floorTrips(n: number): number {
+// Minutes a floor should take when `builders` people are building (1 or none: soloMins; more: up to ~5.5,
+// never over maxMins). Client tower.js uses the solo value in local play.
+export function floorMinutes(builders: number): number {
   const S = BUILDING_SCALE;
-  return Math.min(S.tripsMax, S.tripsBase + n * S.tripsPer);
+  return Math.min(S.maxMins, S.soloMins + S.crowdMins * (1 - 1 / Math.max(1, builders)));
 }
-// The smallest a floor of building n can be (an empty room, a lone new player).
-export function floorMin(n: number, floor: number): number {
+// The smallest a floor of building n can be (an empty room, nobody's pace known yet).
+export function floorMin(n: number): number {
   const S = BUILDING_SCALE;
-  return Math.max(1, Math.round(S.minBase * Math.pow(S.minGrowth, n) * (1 + floor * S.floorGrowth)));
+  return Math.max(1, Math.round(S.minBase * Math.pow(S.minGrowth, n)));
 }
-// Blocks floor `floor` of building n needs when the room's active builders' bags add up to `roomTrip`
-// (client tower.js floorNeed: the same rule in local play, on your own bag).
-export function floorNeed(n: number, floor: number, roomTrip: number): number {
-  const S = BUILDING_SCALE;
-  const want = floorTrips(n) * Math.max(0, roomTrip) * (1 + floor * S.floorGrowth);
-  return Math.max(floorMin(n, floor), Math.round(Math.min(want, 1e15)));
+// Blocks a floor of building n needs when the room places `rate` blocks a minute and the floor should take
+// `mins` minutes (client tower.js floorNeed: the same rule in local play, on your own pace).
+export function floorNeed(n: number, rate: number, mins: number): number {
+  const want = Math.max(0, rate) * Math.max(0, mins);
+  return Math.max(floorMin(n), Math.round(Math.min(want, 1e15)));
+}
+
+// One builder's pace in blocks a minute: what they reported over the last BUILDING_SCALE.window s. In their
+// first `window` s of building (a new player, or back after more than `active` s away) the missing part of
+// the window is filled with one full bag (`trip`) every `tripSecs` s, so a first bag never reads as a sprint.
+// (Client tower.js has the same tracker for local play.)
+export class BuildRate {
+  private samples: { at: number; n: number }[] = []; // ~1 s buckets
+  private sum = 0;
+  private first = 0;
+  private last = -Infinity;
+  private trip = 1;
+
+  add(blocks: number, trip: number, now: number): void {
+    const S = BUILDING_SCALE;
+    if (now - this.last > S.active * 1000) {
+      this.samples = [];
+      this.sum = 0;
+      this.first = now;
+    }
+    this.last = now;
+    if (Number.isFinite(trip) && trip > 0) this.trip = trip;
+    if (blocks > 0 && Number.isFinite(blocks)) {
+      const tail = this.samples[this.samples.length - 1];
+      if (tail && now - tail.at < 1000) tail.n += blocks;
+      else this.samples.push({ at: now, n: blocks });
+      this.sum += blocks;
+    }
+    this.trim(now);
+  }
+  active(now: number): boolean {
+    return now - this.last <= BUILDING_SCALE.active * 1000;
+  }
+  perMinute(now: number): number {
+    const S = BUILDING_SCALE;
+    this.trim(now);
+    const span = Math.min(S.window, Math.max(0, (now - this.first) / 1000));
+    const prior = (this.trip * 60) / S.tripSecs;
+    return (this.sum * 60) / S.window + (1 - span / S.window) * prior;
+  }
+  private trim(now: number): void {
+    const since = now - BUILDING_SCALE.window * 1000;
+    while (this.samples.length && this.samples[0].at < since) this.sum -= this.samples.shift()!.n;
+    if (!this.samples.length) this.sum = 0; // no float drift
+  }
+}
+
+// The room's active builders: how many and their summed pace (blocks a minute).
+export interface Crew {
+  n: number;
+  rate: number;
+}
+export function crewOf(rates: Iterable<BuildRate>, now: number): Crew {
+  let n = 0;
+  let rate = 0;
+  for (const r of rates) {
+    if (!r.active(now)) continue;
+    n++;
+    rate += r.perMinute(now);
+  }
+  return { n, rate };
 }
 
 const clampInt = (v: unknown, max: number): number => (typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(0, Math.floor(v))) : 0);
@@ -69,16 +130,34 @@ export function sanitizeTowerSeed(raw: unknown): { n: number; floors: number; bl
 export class TowerRules {
   // Blocks placed on the CURRENT building, by player (the finale's Top Builders).
   private contrib = new Map<string, Builder>();
+  // Minutes the current floor was sized for (eases toward floorMinutes(crew) floor by floor; null = not yet).
+  private mins: number | null = null;
+  // The crew the current floor was sized for (its pace sets when the floor shrinks), and the last crew that
+  // had anyone in it (sizes a floor that starts while nobody is building: after a celebration).
+  private sizedFor: Crew = { n: 0, rate: 0 };
+  private lastCrew: Crew | null = null;
+  // The floor was sized with nobody's pace known (a fresh room): the first build sizes it again.
+  private blind = false;
 
-  // `roomTrip()` = the summed bags (blocks per full bag) of the room's active builders (WorldRoom tracks them).
+  // `crew()` = the room's active builders and their summed pace (WorldRoom tracks them, crewOf).
   constructor(
     private t: TowerData,
-    private roomTrip: () => number = () => 0,
+    private crew: () => Crew = () => ({ n: 0, rate: 0 }),
   ) {}
 
-  // Sizes the floor being built now (a new floor, a new building, a seed).
+  // Sizes the floor being built now (a new floor, a new building, a seed): the room's pace x the floor's
+  // minutes, which move `rampUp` / `rampDown` of the way toward what this many builders should take.
   private startFloor(): void {
-    this.t.need = floorNeed(this.t.n, this.t.floors, this.roomTrip());
+    const S = BUILDING_SCALE;
+    let c = this.crew();
+    if (c.n > 0) this.lastCrew = c;
+    else if (this.lastCrew) c = this.lastCrew;
+    this.blind = c.n === 0;
+    const target = floorMinutes(c.n);
+    const m = this.mins;
+    this.mins = m == null ? target : m + (target - m) * (target > m ? S.rampUp : S.rampDown);
+    this.sizedFor = c;
+    this.t.need = floorNeed(this.t.n, c.rate, this.mins);
   }
 
   // Gives a fresh room its starting tower (the first player's save) once. A building that was already
@@ -91,7 +170,7 @@ export class TowerRules {
     this.t.phase = s.floors >= buildingFloors(s.n) ? "celebrate" : "building";
     this.t.phaseAt = now;
     this.startFloor();
-    // A saved floor bigger than the room's bags now just needs one more block (never a stuck floor).
+    // A saved floor bigger than the room's floor now just needs one more block (never a stuck floor).
     this.t.blocks = Math.min(s.blocks, Math.max(0, this.t.need - 1));
     this.t.placed = this.t.blocks;
     this.t.seeded = true;
@@ -108,7 +187,8 @@ export class TowerRules {
     let taken = 0;
     let built: { n: number; builders: Builder[] } | null = null;
     while (left > 0 && t.phase === "building") {
-      if (!(t.need > 0)) this.startFloor();
+      // A floor sized before anyone's pace was known (a fresh room) is sized again by its first blocks.
+      if (!(t.need > 0) || (this.blind && t.blocks === 0)) this.startFloor();
       const put = Math.max(0, Math.min(t.need - t.blocks, left));
       t.blocks += put;
       t.placed += put;
@@ -122,7 +202,7 @@ export class TowerRules {
           t.phase = "celebrate";
           t.phaseAt = now;
           built = { n: t.n, builders: this.builders() };
-        } else this.startFloor(); // the next floor is sized to who is building now
+        } else this.startFloor(); // the next floor is sized to who is building now (a joiner counts from here)
       }
     }
     return { taken, built };
@@ -132,11 +212,16 @@ export class TowerRules {
   tick(now: number): boolean {
     const t = this.t;
     if (!t.seeded) return false;
-    // The room got weaker (its strongest builder left or went idle): the floor shrinks to what the room can
-    // fill now (never below what is already on it + 1), so a floor never gets stuck at a size nobody can finish.
-    if (t.phase === "building") {
-      const fit = floorNeed(t.n, t.floors, this.roomTrip());
-      if (fit < t.need) t.need = Math.max(fit, Math.floor(t.blocks) + 1);
+    // The room got slower (a builder left or went idle): only the REMAINING part of the floor shrinks, in
+    // proportion, so its progress never goes back and it never sticks at a size nobody can finish. A faster
+    // room never grows a started floor (the next one is sized to it). Nobody building: left as it is.
+    if (t.phase === "building" && this.sizedFor.rate > 0) {
+      const c = this.crew();
+      if (c.n > 0 && c.rate < this.sizedFor.rate * BUILDING_SCALE.shrinkAt) {
+        const rest = Math.max(0, t.need - t.blocks) * (c.rate / this.sizedFor.rate);
+        t.need = Math.max(Math.floor(t.blocks) + 1, Math.min(t.need, Math.round(t.blocks + rest)));
+        this.sizedFor = { n: c.n, rate: c.rate };
+      }
     }
     if (t.phase === "celebrate" && now - t.phaseAt >= INSIDE_SECONDS * 1000) {
       t.phase = "sinking";
