@@ -1,58 +1,66 @@
 import { MongoClient, type Collection } from "mongodb";
 
-import { LEADERBOARD_STATS } from "./constants.js";
+import { LEADERBOARD_FIELDS } from "./constants.js";
+import type { RewardsDoc } from "./rewards.js";
 
 // Bloxity Legion hosting injects MONGODB_URI per game+channel -- an isolated database with
 // scoped credentials. A local `npm start` normally has no Mongo reachable, so a missing or
 // unreachable URI must degrade to "no persistence" rather than crash the room.
 
-// The persisted client state (what `saveProgress` carries, see sanitize.ts). The client keeps
-// nothing in the browser: this document is the player's only save.
-export interface PlayerDoc {
-  _id: string; // Bloxity user id -- see WorldRoom.ts (guests are never saved)
-  username?: string; // display name as of the last save
-  trophies?: number; // Wins (the HUD's trophy counter, the shop currency)
-  gems?: number;
-  energy?: number; // lightning (rebirth.js), the race speed
-  rebirths?: number;
-  autoRebirth?: boolean;
-  bestDistance?: number; // personal best race, studs (only ever goes up)
-  playtime?: number; // s with the game visible
-  boats?: string[]; // owned boat ids (client BOATS.list)
-  boat?: string; // the equipped boat (an owned one)
-  engines?: string[]; // owned engine ids (client engine.js ENGINES)
-  engine?: string; // the equipped engine, "" = none
-  partners?: string[]; // owned partner ids (client PARTNER.partners)
-  partner?: string; // the equipped partner, "" = none
-  trails?: string[]; // owned trail ids (client TRAILS.list)
-  trail?: string; // the equipped trail, "" = none
-  pets?: SavedPet[]; // owned pets (client pets.js), at most PETS_MAX
-  petSlots?: number; // pets equipped at once
-  petStorage?: number; // pets owned at most
-  eggsSeen?: string[]; // pet kinds ever hatched (client eggs.js: the NEW! tag)
-  world?: string; // the world the player was in (client worlds.js WORLDS), "" = the start world
-  worldsUnlocked?: string[]; // worlds whose portal requirement was met once (they stay open)
-  giftTime?: number; // Online Gifts clock, s online this round
-  giftsClaimed?: number[]; // GIFTS.list indexes claimed this round
-  potions?: Record<string, number>; // potion id -> count (gifts.js)
-  lastSeen?: number; // epoch ms of the last activity
-  // Spin wheel (spin.ts): written only by the server's `spin` handler, never by saveProgress.
-  spins?: number; // spins ready to use
-  spinAt?: number; // epoch ms the next free spin arrives
-  // Daily Reward (daily.ts): written by the server only, never by saveProgress.
-  dailyDay?: number; // days unlocked this cycle
-  dailyLast?: number; // UTC day index of the last unlock
-  dailyClaimed?: number[]; // claimed day indexes this cycle
-  version: number;
-  updatedAt: Date;
+// One owned pet (client stats.js `state.pets`): its uid, catalog id and tier (0 normal, 1 golden, 2 rainbow).
+export interface SavedPet {
+  uid: number;
+  id: string;
+  tier: number;
 }
 
-// One owned pet: its kind (client PETS.kinds key) and craft tier (index into PETS.tiers).
-export interface SavedPet {
-  kind: string;
-  tier: number;
-  equipped: boolean;
-  locked: boolean;
+// A running timed boost (client stats.js `state.timed`): stat x mult for `left` more seconds of play.
+export interface TimedBoost {
+  stat: string;
+  mult: number;
+  left: number;
+}
+
+// The persisted client state: what `saveProgress` carries (see sanitize.ts), field for field the
+// client's `SAVED` list in stats.js. Signed-in players' progress lives here; guests keep theirs
+// in their browser.
+export interface PlayerDoc {
+  _id: string; // Bloxity user id from the verified token (auth.ts); guests are never saved
+  username?: string; // display name as of the last save
+  cash?: number;
+  strength?: number;
+  speed?: number;
+  totalBlocks?: number; // blocks placed into towers (the rank XP)
+  buildings?: number; // towers finished while the player helped
+  bag?: number; // blocks carried
+  upgrades?: Record<string, number>; // upgrade id -> level
+  passes?: Record<string, boolean>; // pass id -> owned
+  gymOwned?: Record<string, boolean>; // premium gym tier index -> owned
+  daily?: { day: string; streak: number }; // last claimed day (YYYY-MM-DD) and the streak
+  giftIn?: number; // s of play until the free gift
+  playtime?: number; // s
+  tower?: { n: number; floors: number; blocks: number }; // the tower's progress (client tower.js toSave())
+  rankSeen?: number;
+  gear?: { owned: Record<string, boolean>; on: string | null }; // Robot Gear
+  pets?: SavedPet[];
+  petEq?: number[]; // uids of the pets out
+  petSeen?: Record<string, boolean>;
+  petUid?: number;
+  spins?: { normal: number; golden: number; pity: number };
+  petSlots?: number; // extra pet slots bought with cash
+  timed?: TimedBoost[]; // running timed boosts (reward prizes)
+  rewards?: RewardsDoc; // Daily / Playtime / Free rewards: written ONLY by the server (rewards.ts)
+  lastSeen?: number; // epoch ms of the last activity: written ONLY by the server (every save, leave and load)
+  offlineSecs?: number; // seconds away not yet claimed as an offline reward: written ONLY by the server (offline.ts)
+  // Invite Friends (invite.ts): written ONLY by the server, never taken from a save.
+  invites?: number; // friends who started playing through this player's invites
+  inviteClaimed?: number[]; // claimed INVITE_TIERS indexes
+  welcome?: "ready" | "claimed"; // the invited player's welcome gift
+  invitesSent?: string[]; // friend ids invited directly through Bloxity (newest last)
+  invitedBy?: string; // who invited this player (set once)
+  inviteCredited?: boolean; // this player already counted for their inviter (once)
+  version: number;
+  updatedAt: Date;
 }
 
 let client: MongoClient | null = null;
@@ -71,8 +79,8 @@ export async function connectDb(): Promise<void> {
     players = client.db().collection<PlayerDoc>("players");
     console.log("[db] connected to MongoDB");
     // The leaderboards sort and count by these (leaderboard.ts).
-    for (const stat of LEADERBOARD_STATS) {
-      players.createIndex({ [stat]: -1 }).catch((err) => console.warn(`[db] index on ${stat} failed`, err));
+    for (const field of new Set(Object.values(LEADERBOARD_FIELDS))) {
+      players.createIndex({ [field]: -1 }).catch((err) => console.warn(`[db] index on ${field} failed`, err));
     }
   } catch (err) {
     console.warn("[db] connect failed -- player progress will not persist:", err);

@@ -1,8 +1,8 @@
-import { LEADERBOARD_EVERY_MS, LEADERBOARD_SIZE, LEADERBOARD_STATS, type LeaderboardStat } from "./constants.js";
+import { LEADERBOARD_EVERY_MS, LEADERBOARD_FIELDS, LEADERBOARD_SIZE, LEADERBOARD_STATS, type LeaderboardStat } from "./constants.js";
 import { getPlayers } from "./db.js";
 
-// The plaza's four leaderboard boards (client plaza.js): the top LEADERBOARD_SIZE saved players by
-// rebirths, Wins (trophies), Power (energy) and playtime, read from every saved doc. The top lists
+// The in-world leaderboard wall (client leaderboard.js): the top LEADERBOARD_SIZE saved players by
+// strength, speed, blocks placed (doc `totalBlocks`), cash, buildings and playtime, read from every saved doc. The top lists
 // are one shared cache per process (every room reads it), refreshed at most every
 // LEADERBOARD_EVERY_MS; each player's own rank is counted per refresh. Guests are never saved, so
 // they never appear (their rank is null).
@@ -41,12 +41,13 @@ async function readBoards(): Promise<Boards> {
   const boards = empty();
   await Promise.all(
     LEADERBOARD_STATS.map(async (stat) => {
+      const field = LEADERBOARD_FIELDS[stat];
       const docs = await players
-        .find({ [stat]: { $gt: 0 } }, { projection: { username: 1, [stat]: 1 } })
-        .sort({ [stat]: -1 })
+        .find({ [field]: { $gt: 0 } }, { projection: { username: 1, [field]: 1 } })
+        .sort({ [field]: -1 })
         .limit(LEADERBOARD_SIZE)
         .toArray();
-      boards[stat] = docs.map((d) => ({ name: d.username || "Player", value: Number(d[stat]) || 0 }));
+      boards[stat] = docs.map((d) => ({ name: d.username || "Player", value: Number(d[field]) || 0 }));
     }),
   );
   return boards;
@@ -58,13 +59,14 @@ export async function ranksOf(userId: string): Promise<Ranks> {
   const players = getPlayers();
   if (!userId || !players) return ranks;
   try {
-    const doc = await players.findOne({ _id: userId }, { projection: Object.fromEntries(LEADERBOARD_STATS.map((s): [string, number] => [s, 1])) });
+    const doc = await players.findOne({ _id: userId }, { projection: Object.fromEntries(LEADERBOARD_STATS.map((s): [string, number] => [LEADERBOARD_FIELDS[s], 1])) });
     if (!doc) return ranks;
     await Promise.all(
       LEADERBOARD_STATS.map(async (stat) => {
-        const v = Number(doc[stat]);
+        const field = LEADERBOARD_FIELDS[stat];
+        const v = Number(doc[field]);
         if (!(v > 0)) return;
-        ranks[stat] = (await players.countDocuments({ [stat]: { $gt: v } })) + 1;
+        ranks[stat] = (await players.countDocuments({ [field]: { $gt: v } })) + 1;
       }),
     );
   } catch (err) {
