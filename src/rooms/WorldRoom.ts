@@ -1,6 +1,6 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState, TowerState } from "./schema/WorldState.js";
-import { BUILD_BUCKET, BUILD_MSG_MAX, INVITES_MAX, INVITE_NEW_PLAYTIME_MAX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS, TOWER_TICK_MS } from "../constants.js";
+import { BUILD_BUCKET, BUILD_MSG_MAX, BUILDING_SCALE, TRIP_MAX, INVITES_MAX, INVITE_NEW_PLAYTIME_MAX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS, TOWER_TICK_MS } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
 import { devIdentity, verifyToken, type Identity } from "../auth.js";
@@ -40,8 +40,18 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   })();
   maxClients = ROOM_MAX_CLIENTS;
 
+  // sessionId -> the player's bag (blocks one full bag places, `build.trip`) and when they last built:
+  // the floors are sized to the bags of the room's active builders (tower.ts floorNeed).
+  private trips = new Map<string, { trip: number; at: number }>();
+  // The summed bags of the builders who placed blocks in the last BUILDING_SCALE.active s.
+  private roomTrip(): number {
+    const since = Date.now() - BUILDING_SCALE.active * 1000;
+    let sum = 0;
+    for (const t of this.trips.values()) if (t.at >= since) sum += t.trip;
+    return sum;
+  }
   // The shared tower's rules over state.tower (tower.ts).
-  private tower = new TowerRules(this.state.tower);
+  private tower = new TowerRules(this.state.tower, () => this.roomTrip());
   // sessionId -> the tower the player's browser holds (join option `tower`): seeds a fresh room when the
   // first player to load has no stored one (a guest, or no database).
   private towerOffers = new Map<string, ReturnType<typeof sanitizeTowerSeed>>();
@@ -102,14 +112,18 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       const p = this.state.players.get(client.sessionId);
       if (p) applyEmote(p, msg);
     },
-    // The blocks this player just placed on the shared tower: { blocks } (the client batches ~4/s).
-    // The server clamps to what the building still needs, rolls floors over, may finish the building
-    // (-> `built` to everyone) and the new state reaches every client through WorldState.tower.
+    // The blocks this player just placed on the shared tower: { blocks, trip } (the client batches ~4/s;
+    // `trip` = blocks one full bag of theirs places, which sizes the next floors). The server clamps to what
+    // the floor needs, rolls floors over, may finish the building (-> `built` to everyone) and the new
+    // state reaches every client through WorldState.tower.
     build: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
       if (!p || !this.takeBuildToken(client.sessionId)) return;
-      const blocks = (msg as { blocks?: unknown } | null)?.blocks;
+      const m = msg as { blocks?: unknown; trip?: unknown } | null;
+      const blocks = m?.blocks;
       if (typeof blocks !== "number" || !Number.isFinite(blocks)) return;
+      const trip = typeof m?.trip === "number" && Number.isFinite(m.trip) ? Math.min(TRIP_MAX, Math.max(1, m.trip)) : this.trips.get(client.sessionId)?.trip ?? 1;
+      this.trips.set(client.sessionId, { trip, at: Date.now() });
       const res = this.tower.addBlocks(Math.min(BUILD_MSG_MAX, blocks), { id: p.uid || client.sessionId, name: p.username || "Player" }, Date.now());
       // `built` { n, builders: [{ id, name, blocks }] }: the Top Builders of the building that just finished.
       if (res.built) this.broadcast("built", res.built);
@@ -362,6 +376,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.refs.delete(sessionId);
     this.activating.delete(sessionId);
     this.buildBuckets.delete(sessionId);
+    this.trips.delete(sessionId);
     this.rewards.delete(sessionId);
     this.claiming.delete(sessionId);
     this.offline.delete(sessionId);

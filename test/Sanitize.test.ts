@@ -73,4 +73,11 @@ describe("sanitizeProgress", () => {
     assert.deepStrictEqual(out.petEq, [2, 1]);
     assert.strictEqual(out.petUid, 6);
   });
+
+  it("keeps the Goals tracker bounded (client goals.js)", () => {
+    const out = sanitizeProgress({ goals: { kind: "place", need: 340, have: 120.5, reward: 1e40, done: 7.9, day: 20773, today: -3, seen: 1.7e12, extra: "x" } })!;
+    assert.deepStrictEqual(out.goals, { kind: "place", need: 340, have: 120.5, reward: CURRENCY_MAX, done: 7, day: 20773, today: 0, seen: 1.7e12 });
+    assert.strictEqual(sanitizeProgress({ goals: { kind: "<script>" } })!.goals!.kind, "", "only slug kinds");
+    assert.strictEqual(sanitizeProgress({ goals: "junk" })!.goals, undefined, "junk leaves the field alone");
+  });
 });

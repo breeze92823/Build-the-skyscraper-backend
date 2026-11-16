@@ -1,9 +1,9 @@
 import {
-  BAG_MAX, BUILDINGS_MAX, CURRENCY_MAX, DAILY_STREAK_MAX, EQUIPPED_MAX, FLAGS_MAX, GIFT_SECONDS_MAX, ID_PATTERN,
+  BAG_MAX, BUILDINGS_MAX, CURRENCY_MAX, DAILY_STREAK_MAX, EQUIPPED_MAX, FLAGS_MAX, GIFT_SECONDS_MAX, GOALS_DONE_MAX, ID_PATTERN,
   NAME_MAX, PETS_MAX, PET_SLOTS_BOUGHT_MAX, PET_TIERS_MAX, PET_UID_MAX, PITY_MAX, PLAY_SECONDS_MAX, RANK_MAX, SPINS_MAX, STAT_MAX,
   TIMED_MAX, TIMED_MULT_MAX, TIMED_SECONDS_MAX, TIMED_STATS, TOWER_MAX, UPGRADE_KINDS_MAX, UPGRADE_LEVEL_MAX,
 } from "./constants.js";
-import type { PlayerDoc, SavedPet, TimedBoost } from "./db.js";
+import type { GoalsDoc, PlayerDoc, SavedPet, TimedBoost } from "./db.js";
 
 export function finite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -74,6 +74,23 @@ export function sanitizeTimed(raw: unknown): TimedBoost[] {
 // The game is client-authoritative -- no server-side gameplay validation. What IS enforced:
 // shape and bounds, so a malformed payload can never corrupt this player's own Mongo document.
 // Only the fields the message carries come back, so a partial save never wipes the others.
+// The Goals tracker (client goals.js): a slug kind, bounded counts. Junk -> null (the field is left alone).
+export function sanitizeGoals(raw: unknown): GoalsDoc | null {
+  if (!isObject(raw)) return null;
+  const num = (v: unknown, max: number) => (finite(v) ? clampNum(v, max) : 0);
+  const int = (v: unknown, max: number) => (finite(v) ? clampInt(v, max) : 0);
+  return {
+    kind: typeof raw.kind === "string" && (raw.kind === "" || ID_PATTERN.test(raw.kind)) ? raw.kind : "",
+    need: num(raw.need, STAT_MAX * 1e3),
+    have: num(raw.have, STAT_MAX * 1e3),
+    reward: num(raw.reward, CURRENCY_MAX),
+    done: int(raw.done, GOALS_DONE_MAX),
+    day: int(raw.day, 1e7),
+    today: int(raw.today, GOALS_DONE_MAX),
+    seen: num(raw.seen, 1e14),
+  };
+}
+
 export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (!isObject(raw)) return null;
   const out: Partial<PlayerDoc> = {};
@@ -91,6 +108,10 @@ export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (finite(raw.petUid)) out.petUid = clampInt(raw.petUid, PET_UID_MAX, 1);
   if (finite(raw.petSlots)) out.petSlots = clampInt(raw.petSlots, PET_SLOTS_BOUGHT_MAX);
   if (raw.timed !== undefined) out.timed = sanitizeTimed(raw.timed);
+  if (raw.goals !== undefined) {
+    const g = sanitizeGoals(raw.goals);
+    if (g) out.goals = g;
+  }
   // `rewards` is never taken from a save: only the server writes it (rewards.ts).
 
   if (raw.upgrades !== undefined) out.upgrades = upgrades(raw.upgrades);
