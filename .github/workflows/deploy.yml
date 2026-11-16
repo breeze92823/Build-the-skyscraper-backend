@@ -9,10 +9,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Repo variable, set under Settings -> Secrets and variables -> Actions -> Variables.
-  # Must match the lowercase game ID created on the Bloxity "My Games" dashboard
-  # (the client's GAME_SLUG in src/config.js: bowling-roll).
-  GAME_ID: ${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}
+  # The game ID is the slug `build-the-skyscraper` (the client's GAME_SLUG in src/config.js).
+  # LEGION_GAME_ID (repo variable or secret) is an optional override and normally left unset.
+  GAME_ID: ${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID || 'build-the-skyscraper' }}
 
 jobs:
   test:
@@ -51,10 +50,6 @@ jobs:
 
       - name: Validate required config
         run: |
-          if [ -z "${GAME_ID}" ]; then
-            echo "::error::LEGION_GAME_ID is not set (Settings > Secrets and variables > Actions > Variables)."
-            exit 1
-          fi
           if [ -z "${LEGION_DEPLOY_TOKEN}" ]; then
             echo "::error::Repo secret LEGION_DEPLOY_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
             exit 1
